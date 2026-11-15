@@ -20,11 +20,16 @@ import os
 import time
 
 from absl import logging
-from perfetto.trace_builder.proto_builder import TraceProtoBuilder
-from tunix.perf import span
+try:
+  from perfetto.trace_builder.proto_builder import TraceProtoBuilder
+  from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import TrackDescriptor
+  from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import TrackEvent
+except Exception:
+  TraceProtoBuilder = None
+  TrackDescriptor = None
+  TrackEvent = None
 
-from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import TrackDescriptor
-from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import TrackEvent
+from tunix.perf import span
 
 Span = span.Span
 SpanGroup = span.SpanGroup

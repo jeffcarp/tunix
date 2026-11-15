@@ -20,6 +20,7 @@ talks.md
 contributing.md
 code-of-conduct.md
 gallery.rst
+proposals/keras_mlx_grpo.md
 ```
 
 ```{eval-rst}
