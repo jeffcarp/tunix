@@ -182,16 +182,17 @@ class KerasRollout:
       # Forward pass to obtain next-token logits
       curr_tensor = ops.convert_to_tensor(current_ids)
       logits = self.model(curr_tensor)
-      next_logits = logits[:, -1, :] / temperature
+      raw_next_logits = logits[:, -1, :]
 
-      # Log-softmax for exact probability tracking
-      step_log_probs = ops.log_softmax(next_logits, axis=-1)
+      # Unscaled log-softmax for exact policy probability tracking
+      step_log_probs = ops.log_softmax(raw_next_logits, axis=-1)
 
-      # Sample next token
+      # Sample next token using temperature-scaled logits
       if self.config.temperature <= 1e-4:
-        sampled_token = ops.argmax(next_logits, axis=-1)
+        sampled_token = ops.argmax(raw_next_logits, axis=-1)
       else:
-        probs = ops.convert_to_numpy(ops.softmax(next_logits, axis=-1))
+        sampling_logits = raw_next_logits / temperature
+        probs = ops.convert_to_numpy(ops.softmax(sampling_logits, axis=-1))
         # Ensure valid probability distribution
         probs = np.clip(probs, 0.0, 1.0)
         probs = probs / np.sum(probs, axis=-1, keepdims=True)
@@ -203,11 +204,14 @@ class KerasRollout:
       sampled_tensor = ops.convert_to_tensor(sampled_token_np)
 
       # Extract log-probability of sampled token
-      sampled_logp = ops.take_along_axis(
-          step_log_probs,
-          ops.expand_dims(sampled_tensor, -1),
+      sampled_logp = ops.squeeze(
+          ops.take_along_axis(
+              step_log_probs,
+              ops.expand_dims(sampled_tensor, -1),
+              axis=-1,
+          ),
           axis=-1,
-      ).squeeze(-1)
+      )
 
       token_logp_np = ops.convert_to_numpy(sampled_logp)
 
@@ -289,11 +293,14 @@ class KerasGRPOTrainer:
     full_tensor = ops.convert_to_tensor(full_ids)
     ref_logits = self.reference_model(full_tensor)
     c_logits = ref_logits[:, prompt_len - 1 : prompt_len + comp_len - 1, :]
-    ref_logps = ops.take_along_axis(
-        ops.log_softmax(c_logits, axis=-1),
-        ops.expand_dims(ops.convert_to_tensor(completion_ids), -1),
+    ref_logps = ops.squeeze(
+        ops.take_along_axis(
+            ops.log_softmax(c_logits, axis=-1),
+            ops.expand_dims(ops.convert_to_tensor(completion_ids), -1),
+            axis=-1,
+        ),
         axis=-1,
-    ).squeeze(-1)
+    )
     return ops.convert_to_numpy(ref_logps)
 
   def grpo_loss(
@@ -313,11 +320,14 @@ class KerasGRPOTrainer:
     with StatelessScope(state_mapping=mapping):
       logits = self.model(full_ids_tensor)
       c_logits = logits[:, prompt_len - 1 : prompt_len + comp_len - 1, :]
-      log_probs = ops.take_along_axis(
-          ops.log_softmax(c_logits, axis=-1),
-          ops.expand_dims(comp_tensor, -1),
+      log_probs = ops.squeeze(
+          ops.take_along_axis(
+              ops.log_softmax(c_logits, axis=-1),
+              ops.expand_dims(comp_tensor, -1),
+              axis=-1,
+          ),
           axis=-1,
-      ).squeeze(-1)
+      )
 
       ratio = ops.exp(log_probs - old_logps_tensor)
       clipped_ratio = ops.clip(

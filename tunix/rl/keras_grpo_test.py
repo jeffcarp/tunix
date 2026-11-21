@@ -162,6 +162,40 @@ class KerasGRPOTest(unittest.TestCase):
     # Model should have learned and improved significantly
     self.assertGreater(avg_final, avg_initial)
 
+  def test_top_level_lazy_exports(self):
+    import tunix
+
+    self.assertIs(tunix.KerasGRPOConfig, keras_grpo.KerasGRPOConfig)
+    self.assertIs(tunix.KerasGRPOTrainer, keras_grpo.KerasGRPOTrainer)
+    self.assertIs(tunix.KerasRollout, keras_grpo.KerasRollout)
+    exported = dir(tunix)
+    self.assertIn("GRPOLearner", exported)
+    self.assertIn("PeftTrainer", exported)
+    self.assertIn("KerasGRPOTrainer", exported)
+    with self.assertRaises(AttributeError):
+      _ = tunix.NonExistentTunixSymbol
+
+  def test_rollout_old_logps_unscaled(self):
+    np.random.seed(0)
+    model = self._build_toy_model(vocab_size=8, embed_dim=8)
+    config = keras_grpo.KerasGRPOConfig(
+        num_generations=2,
+        max_tokens_to_generate=1,
+        temperature=0.5,
+    )
+    rollout = keras_grpo.KerasRollout(model, config)
+    prompts = np.array([[1, 2], [3, 4]], dtype=np.int32)
+    out = rollout.generate(prompts)
+
+    raw_logits = model(ops.convert_to_tensor(out.prompt_ids))[:, -1, :]
+    expected_logps = ops.convert_to_numpy(ops.log_softmax(raw_logits, axis=-1))
+    chosen = out.completion_ids[:, 0]
+    np.testing.assert_allclose(
+        out.old_log_probs[:, 0],
+        expected_logps[np.arange(len(chosen)), chosen],
+        atol=1e-5,
+    )
+
 
 if __name__ == "__main__":
   unittest.main()

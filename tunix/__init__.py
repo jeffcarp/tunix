@@ -14,6 +14,7 @@
 
 """Tunix API."""
 
+import importlib
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version
 
@@ -23,45 +24,83 @@ except PackageNotFoundError:
   __version__ = "0.0.0.dev0"  # fallback for editable installs
 
 
-# pylint: disable=g-multiple-import, g-importing-member
+# Lazy public exports avoid eagerly importing JAX/Flax/Metrax/Perfetto when
+# using lightweight or alternative backends such as Keras MLX.
+_LAZY_IMPORTS: dict[str, tuple[str, str]] = {
+    "AgenticGRPOConfig": (
+        "tunix.rl.agentic.agentic_grpo_learner",
+        "GRPOConfig",
+    ),
+    "AgenticGRPOLearner": (
+        "tunix.rl.agentic.agentic_grpo_learner",
+        "GRPOLearner",
+    ),
+    "CacheConfig": ("tunix.generate.sampler", "CacheConfig"),
+    "CheckpointManager": ("tunix.sft.checkpoint_manager", "CheckpointManager"),
+    "ClusterConfig": ("tunix.rl.rl_cluster", "ClusterConfig"),
+    "DPOTrainer": ("tunix.sft.dpo.dpo_trainer", "DPOTrainer"),
+    "DPOTrainingConfig": ("tunix.sft.dpo.dpo_trainer", "DPOTrainingConfig"),
+    "DistillationTrainer": (
+        "tunix.distillation.distillation_trainer",
+        "DistillationTrainer",
+    ),
+    "DistillationTrainingConfig": (
+        "tunix.distillation.distillation_trainer",
+        "TrainingConfig",
+    ),
+    "DpoTrainer": ("tunix.sft.dpo.dpo_trainer", "DpoTrainer"),
+    "DpoTrainingConfig": ("tunix.sft.dpo.dpo_trainer", "DpoTrainingConfig"),
+    "GRPOConfig": ("tunix.rl.grpo.grpo_learner", "GRPOConfig"),
+    "GRPOLearner": ("tunix.rl.grpo.grpo_learner", "GRPOLearner"),
+    "GrpoConfig": ("tunix.rl.grpo.grpo_learner", "GrpoConfig"),
+    "GrpoLearner": ("tunix.rl.grpo.grpo_learner", "GrpoLearner"),
+    "KerasGRPOConfig": ("tunix.rl.keras_grpo", "KerasGRPOConfig"),
+    "KerasGRPOTrainer": ("tunix.rl.keras_grpo", "KerasGRPOTrainer"),
+    "KerasRollout": ("tunix.rl.keras_grpo", "KerasRollout"),
+    "MetricsBuffer": ("tunix.rl.rl_cluster", "MetricsBuffer"),
+    "MetricsLogger": ("tunix.sft.metrics_logger", "MetricsLogger"),
+    "MetricsLoggerOptions": (
+        "tunix.sft.metrics_logger",
+        "MetricsLoggerOptions",
+    ),
+    "ORPOTrainer": ("tunix.sft.dpo.dpo_trainer", "ORPOTrainer"),
+    "ORPOTrainingConfig": ("tunix.sft.dpo.dpo_trainer", "ORPOTrainingConfig"),
+    "OrpoTrainer": ("tunix.sft.dpo.dpo_trainer", "OrpoTrainer"),
+    "OrpoTrainingConfig": ("tunix.sft.dpo.dpo_trainer", "OrpoTrainingConfig"),
+    "PPOConfig": ("tunix.rl.ppo.ppo_learner", "PPOConfig"),
+    "PPOLearner": ("tunix.rl.ppo.ppo_learner", "PPOLearner"),
+    "PeftTrainer": ("tunix.sft.peft_trainer", "PeftTrainer"),
+    "PerfMetricsConfig": ("tunix.perf.metrics", "PerfMetricsConfig"),
+    "PerfMetricsExport": ("tunix.perf.export", "PerfMetricsExport"),
+    "PerfSpanQuery": ("tunix.perf.metrics", "PerfSpanQuery"),
+    "PpoConfig": ("tunix.rl.ppo.ppo_learner", "PpoConfig"),
+    "PpoLearner": ("tunix.rl.ppo.ppo_learner", "PpoLearner"),
+    "RLCluster": ("tunix.rl.rl_cluster", "RLCluster"),
+    "RLTrainingConfig": ("tunix.rl.rl_cluster", "RLTrainingConfig"),
+    "RewardFn": ("tunix.rl.grpo.grpo_learner", "RewardFn"),
+    "Role": ("tunix.rl.rl_cluster", "Role"),
+    "RolloutConfig": ("tunix.rl.rollout.base_rollout", "RolloutConfig"),
+    "Sampler": ("tunix.generate.sampler", "Sampler"),
+    "Tokenizer": ("tunix.generate.tokenizer_adapter", "Tokenizer"),
+    "TokenizerAdapter": (
+        "tunix.generate.tokenizer_adapter",
+        "TokenizerAdapter",
+    ),
+    "TrainingConfig": ("tunix.sft.peft_trainer", "TrainingConfig"),
+}
 
-from tunix.distillation.distillation_trainer import DistillationTrainer
-from tunix.distillation.distillation_trainer import TrainingConfig as DistillationTrainingConfig
-from tunix.generate.sampler import CacheConfig
-from tunix.generate.sampler import Sampler
-from tunix.generate.tokenizer_adapter import TokenizerAdapter, Tokenizer
-from tunix.perf.export import PerfMetricsExport
-from tunix.perf.metrics import PerfMetricsConfig
-from tunix.perf.metrics import PerfSpanQuery
-from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig as AgenticGRPOConfig
-from tunix.rl.agentic.agentic_grpo_learner import GRPOLearner as AgenticGRPOLearner
-from tunix.rl.grpo.grpo_learner import GRPOConfig
-from tunix.rl.grpo.grpo_learner import GrpoConfig
-from tunix.rl.grpo.grpo_learner import GRPOLearner
-from tunix.rl.grpo.grpo_learner import GrpoLearner
-from tunix.rl.grpo.grpo_learner import RewardFn
-from tunix.rl.ppo.ppo_learner import PPOConfig
-from tunix.rl.ppo.ppo_learner import PpoConfig
-from tunix.rl.ppo.ppo_learner import PPOLearner
-from tunix.rl.ppo.ppo_learner import PpoLearner
-from tunix.rl.rl_cluster import ClusterConfig
-from tunix.rl.rl_cluster import MetricsBuffer
-from tunix.rl.rl_cluster import RLCluster
-from tunix.rl.rl_cluster import RLTrainingConfig
-from tunix.rl.rl_cluster import Role
-from tunix.rl.rollout.base_rollout import RolloutConfig
-from tunix.sft.checkpoint_manager import CheckpointManager
-from tunix.sft.dpo.dpo_trainer import DPOTrainer
-from tunix.sft.dpo.dpo_trainer import DpoTrainer
-from tunix.sft.dpo.dpo_trainer import DPOTrainingConfig
-from tunix.sft.dpo.dpo_trainer import DpoTrainingConfig
-from tunix.sft.dpo.dpo_trainer import ORPOTrainer
-from tunix.sft.dpo.dpo_trainer import OrpoTrainer
-from tunix.sft.dpo.dpo_trainer import ORPOTrainingConfig
-from tunix.sft.dpo.dpo_trainer import OrpoTrainingConfig
-from tunix.sft.metrics_logger import MetricsLogger
-from tunix.sft.metrics_logger import MetricsLoggerOptions
-from tunix.sft.peft_trainer import PeftTrainer
-from tunix.sft.peft_trainer import TrainingConfig
+__all__ = sorted(_LAZY_IMPORTS)
 
-# pylint: enable=g-multiple-import, g-importing-member
+
+def __getattr__(name: str):
+  if name not in _LAZY_IMPORTS:
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+  module_name, attr_name = _LAZY_IMPORTS[name]
+  module = importlib.import_module(module_name)
+  value = getattr(module, attr_name)
+  globals()[name] = value
+  return value
+
+
+def __dir__() -> list[str]:
+  return sorted(set(globals()) | set(_LAZY_IMPORTS))

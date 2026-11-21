@@ -22,11 +22,11 @@ Demonstrates:
 5. Performing clipped surrogate policy updates directly on Apple Silicon GPU.
 
 Usage:
+  See docs/proposals/keras_mlx_grpo.md for full setup instructions, then run:
   KERAS_BACKEND=mlx python examples/rl/grpo/keras_mlx_toy.py
 """
 
 import os
-import sys
 import time
 import numpy as np
 
@@ -37,6 +37,13 @@ if "KERAS_BACKEND" not in os.environ:
 import keras
 from keras import ops
 from tunix.rl.keras_grpo import KerasGRPOConfig, KerasGRPOTrainer
+
+
+def greedy_predict(model: keras.Model, prompts: np.ndarray) -> np.ndarray:
+  """Runs single-step greedy decoding for each prompt."""
+  logits = model(ops.convert_to_tensor(prompts))
+  next_tokens = ops.argmax(logits[:, -1, :], axis=-1)
+  return np.asarray(ops.convert_to_numpy(next_tokens), dtype=np.int32)[:, None]
 
 
 class MiniCausalLM(keras.Model):
@@ -103,30 +110,28 @@ def create_arithmetic_task():
         continue
 
       pred = list(c[:len(target)])
-      if pred == target:
-        rewards.append(1.0)
-      else:
-        # Distance-based shaping: reward closer answers
-        err = abs(pred[0] - target[0])
-        rewards.append(max(0.0, 1.0 - 0.2 * err))
+      rewards.append(1.0 if pred == target else 0.0)
     return rewards
 
   return np.array(prompts, dtype=np.int32), targets, reward_fn
 
 
 def main():
+  np.random.seed(42)
+  keras.utils.set_random_seed(42)
+
   print("=" * 60)
   print(f"Tunix Keras GRPO on Apple Silicon (Backend: {keras.backend.backend()})")
   print("=" * 60)
 
   vocab_size = 16
   model = MiniCausalLM(vocab_size=vocab_size, embed_dim=48, num_heads=2)
-  optimizer = keras.optimizers.AdamW(learning_rate=0.04, weight_decay=1e-4)
+  optimizer = keras.optimizers.AdamW(learning_rate=0.005, weight_decay=1e-4)
 
   config = KerasGRPOConfig(
-      num_generations=6,
+      num_generations=8,
       max_tokens_to_generate=1,
-      temperature=0.7,
+      temperature=1.2,
       epsilon=0.2,
       beta=0.0,  # Critic-free, pure rule-based GRPO
   )
@@ -146,20 +151,20 @@ def main():
 
   # Initial evaluation before training
   print("Initial greedy predictions:")
-  greedy_rollout = trainer.rollout.generate(prompts)
-  for p, c in zip(prompts, greedy_rollout.completion_ids[:len(prompts)]):
+  initial_preds = greedy_predict(model, prompts)
+  for p, c in zip(prompts, initial_preds):
     print(f"  Prompt: {p.tolist()} -> Completion: {c.tolist()} (Expected: {targets[tuple(p.tolist())]})")
   print("-" * 60)
 
   start_time = time.time()
-  num_steps = 15
+  num_steps = 80
 
   for step in range(1, num_steps + 1):
     step_start = time.time()
     metrics = trainer.train_step(prompts)
     step_latency = (time.time() - step_start) * 1000
 
-    if step % 3 == 0 or step == num_steps:
+    if step == 1 or step % 10 == 0 or step == num_steps:
       print(
           f"Step {step:2d}/{num_steps:2d} | "
           f"Mean Reward: {metrics['reward/mean']:.2f} | "
@@ -173,9 +178,9 @@ def main():
   print(f"Training completed in {total_elapsed:.2f}s ({total_elapsed/num_steps:.2f}s per step)")
   print("\nFinal greedy predictions after GRPO post-training:")
 
-  final_rollout = trainer.rollout.generate(prompts)
+  final_preds = greedy_predict(model, prompts)
   successes = 0
-  for p, c in zip(prompts, final_rollout.completion_ids[:len(prompts)]):
+  for p, c in zip(prompts, final_preds):
     expected = targets[tuple(p.tolist())]
     pred = c.tolist()
     is_correct = pred == expected

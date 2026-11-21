@@ -6,6 +6,23 @@
 
 </div>
 
+> **Fork Experiment (`jeffcarp/tunix` — `keras-mlx-grpo-proposal`)**: This branch adds an experimental local GRPO prototype running **Keras 3 + Keras MLX** on Apple Silicon without JAX/TPU dependencies.
+>
+> - **Full setup & design guide**: [docs/proposals/keras_mlx_grpo.md](docs/proposals/keras_mlx_grpo.md)
+> - **Core trainer**: [tunix/rl/keras_grpo.py](tunix/rl/keras_grpo.py)
+> - **Toy example**: [examples/rl/grpo/keras_mlx_toy.py](examples/rl/grpo/keras_mlx_toy.py)
+>
+> ```bash
+> # Quickstart on Apple Silicon with uv (requires Keras master + keras-mlx)
+> uv venv --python 3.12
+> source .venv/bin/activate
+> uv pip install \
+>   "keras @ git+https://github.com/keras-team/keras.git" \
+>   "keras-mlx @ git+https://github.com/keras-team/keras-mlx.git"
+> uv pip install --no-deps -e .
+> KERAS_BACKEND=mlx python examples/rl/grpo/keras_mlx_toy.py
+> ```
+
 **Tunix (Tune-in-JAX)** is a JAX based library designed to streamline the
 post-training of Large Language Models. It provides efficient and scalable
 support for:
