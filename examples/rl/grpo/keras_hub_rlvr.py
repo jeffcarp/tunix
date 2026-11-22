@@ -204,6 +204,11 @@ def parse_args() -> argparse.Namespace:
       default="auto",
       help="MLX device override ('auto', 'gpu', or 'cpu').",
   )
+  parser.add_argument(
+      "--log-ref-kl",
+      action="store_true",
+      help="Log reference KL via zero-copy LoRA toggle even when --beta 0.0.",
+  )
   return parser.parse_args()
 
 
@@ -284,6 +289,7 @@ def main():
       temperature=args.temperature,
       top_p=args.top_p,
       beta=args.beta,
+      log_ref_kl=args.log_ref_kl,
       pad_token_id=int(pad_id),
       eos_token_id=int(eos_id) if eos_id is not None else None,
       stop_token_ids=tuple(extra_stops) if extra_stops else None,
@@ -333,6 +339,9 @@ def main():
 
     solve_pct = float(100.0 * np.mean([float(x["solved"]) for x in last_infos]))
     fmt_pct = float(100.0 * np.mean([float(x["has_format"]) for x in last_infos]))
+    tool_use_pct = float(
+        100.0 * np.mean([float(x.get("used_tool", False)) for x in last_infos])
+    )
     seq_lens = np.sum(metrics["rollout_output"].completion_mask, axis=-1)
     solved_lens = [float(l) for l, info in zip(seq_lens, last_infos) if info["solved"]]
     wrong_lens = [float(l) for l, info in zip(seq_lens, last_infos) if not info["solved"]]
@@ -347,6 +356,7 @@ def main():
             "reward_max": float(metrics["reward/max"]),
             "solve_pct": solve_pct,
             "fmt_pct": fmt_pct,
+            "tool_use_pct": tool_use_pct,
             "entropy": float(metrics["entropy"]),
             "pg_clipfrac": float(metrics["pg_clipfrac"]),
             "kl": float(metrics["kl"]),
@@ -362,10 +372,11 @@ def main():
         }
     )
 
+    tool_str = f" Tool={tool_use_pct:3.0f}%" if args.task == "tool_math" else ""
     print(
         f"Step {step:2d}/{args.steps:2d} | "
         f"R={metrics['reward/mean']:.2f} (max {metrics['reward/max']:.2f}) | "
-        f"Solve={solve_pct:4.0f}% Fmt={fmt_pct:4.0f}% | "
+        f"Solve={solve_pct:4.0f}% Fmt={fmt_pct:4.0f}%{tool_str} | "
         f"Ent={metrics['entropy']:.2f} Clip={100*metrics['pg_clipfrac']:4.1f}% "
         f"KL={metrics['kl']:.4f} | "
         f"Len={metrics['response_len/mean']:.1f} Skip={metrics['skipped_zero_var_groups']} | "

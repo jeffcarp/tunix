@@ -122,6 +122,8 @@ class KerasGRPOConfig(algo_config_lib.AlgorithmConfig):
     max_turns: Maximum tool-interaction turns during rollout.
     offload_optimizer_to_disk: Whether to persist optimizer state to disk
       between rollout and optimization to minimize peak RAM on Apple Silicon.
+    log_ref_kl: If True, evaluates reference KL via `disable_lora` /
+      `reference_model` for telemetry even when `beta == 0.0`.
   """
 
   algo_variant: str = "grpo"
@@ -147,6 +149,7 @@ class KerasGRPOConfig(algo_config_lib.AlgorithmConfig):
   use_kv_cache: bool = True
   max_turns: int = 1
   offload_optimizer_to_disk: bool = False
+  log_ref_kl: bool = False
 
   def __post_init__(self):
     valid_algo_variants = ("grpo", "drgrpo", "dapo", "gspo")
@@ -943,11 +946,12 @@ class KerasGRPOTrainer:
       )
 
       kl_loss = ops.cast(0.0, "float32")
-      if self.config.beta > 0.0 and ref_logps_tensor is not None:
+      if ref_logps_tensor is not None:
         kl = compute_kl_divergence(
             log_probs, ops.cast(ref_logps_tensor, "float32"), method="low_var_kl"
         )
-        policy_loss = policy_loss + self.config.beta * kl
+        if self.config.beta > 0.0:
+          policy_loss = policy_loss + self.config.beta * kl
         kl_loss = ops.sum(kl * loss_mask) / mb_tokens
 
       total_loss = self._aggregate_loss(
@@ -1164,9 +1168,9 @@ class KerasGRPOTrainer:
     active_advantages = advantages[active_row_mask]
     active_old_logps = old_logps[active_row_mask]
 
-    # 3. Reference Log-Probs (if beta > 0)
+    # 3. Reference Log-Probs (if beta > 0 or log_ref_kl telemetry is enabled)
     active_ref_logps = None
-    if self.config.beta > 0.0:
+    if self.config.beta > 0.0 or self.config.log_ref_kl:
       active_ref_logps = self.compute_ref_log_probs(
           active_full_ids,
           prompt_len,
