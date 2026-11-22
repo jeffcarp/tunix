@@ -38,6 +38,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "CacheConfig": ("tunix.generate.sampler", "CacheConfig"),
     "CheckpointManager": ("tunix.sft.checkpoint_manager", "CheckpointManager"),
     "ClusterConfig": ("tunix.rl.rl_cluster", "ClusterConfig"),
+    "CountdownEnv": ("tunix.rl.keras_rl_envs", "CountdownEnv"),
     "DPOTrainer": ("tunix.sft.dpo.dpo_trainer", "DPOTrainer"),
     "DPOTrainingConfig": ("tunix.sft.dpo.dpo_trainer", "DPOTrainingConfig"),
     "DistillationTrainer": (
@@ -86,7 +87,9 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "tunix.generate.tokenizer_adapter",
         "TokenizerAdapter",
     ),
+    "ToolMathEnv": ("tunix.rl.keras_rl_envs", "ToolMathEnv"),
     "TrainingConfig": ("tunix.sft.peft_trainer", "TrainingConfig"),
+    "disable_lora": ("tunix.rl.keras_grpo", "disable_lora"),
 }
 
 __all__ = sorted(_LAZY_IMPORTS)

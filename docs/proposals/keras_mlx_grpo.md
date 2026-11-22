@@ -30,7 +30,7 @@ To achieve this on consumer hardware with bounded memory (e.g., 16 GB to 64 GB R
 
 ### 2.2 Setup Option A — Install directly from GitHub with `uv`
 
-Use this option if you do not already have local clones of `keras` and `keras-mlx`:
+Use this option if you do not already have local clones of `keras`, `keras-mlx`, and `keras-hub`:
 
 ```bash
 git clone -b keras-mlx-grpo-proposal https://github.com/jeffcarp/tunix.git
@@ -44,13 +44,17 @@ uv pip install \
   "keras @ git+https://github.com/keras-team/keras.git" \
   "keras-mlx @ git+https://github.com/keras-team/keras-mlx.git"
 
+# Install KerasHub without TensorFlow/tensorflow-text, plus lightweight tokenizer/preset deps
+uv pip install --no-deps "keras-hub @ git+https://github.com/keras-team/keras-hub.git"
+uv pip install regex tokenizers sentencepiece kagglehub kagglesdk huggingface_hub safetensors
+
 # Install Tunix without JAX/TPU dependencies
 uv pip install --no-deps -e .
 ```
 
 ### 2.3 Setup Option B — Install from local editable checkouts
 
-Use this option when co-developing `keras`, `keras-mlx`, and `tunix` side-by-side (assuming sibling directories `../keras` on `master` and `../keras-mlx` on `main`):
+Use this option when co-developing `keras`, `keras-mlx`, `keras-hub`, and `tunix` side-by-side (assuming sibling directories `../keras` on `master`, `../keras-mlx` on `main`, and `../keras-hub` on `main`):
 
 ```bash
 cd tunix
@@ -59,7 +63,8 @@ uv venv --python 3.12
 source .venv/bin/activate
 
 uv pip install -e ../keras -e ../keras-mlx
-uv pip install --no-deps -e .
+uv pip install --no-deps -e ../keras-hub -e .
+uv pip install regex tokenizers sentencepiece kagglehub kagglesdk huggingface_hub safetensors
 ```
 
 ### 2.4 Verify Backend & Metal GPU
@@ -74,19 +79,59 @@ Expected output:
 Backend: mlx | Device: Device(gpu, 0)
 ```
 
-### 2.5 Run the Toy GRPO Example
+### 2.5 Run SOTA RLVR & Tool-Use RL on KerasHub Models
+
+1. **Countdown RLVR with DAPO** (`qwen3_0.6b_en`, LoRA rank 8, Clip-Higher `0.2/0.28`, dynamic sampling):
+   ```bash
+   KERAS_BACKEND=mlx python examples/rl/grpo/keras_hub_rlvr.py \
+     --preset qwen3_0.6b_en --task countdown --algo dapo --steps 20
+   ```
+2. **Dr.GRPO vs. GSPO variants**:
+   ```bash
+   KERAS_BACKEND=mlx python examples/rl/grpo/keras_hub_rlvr.py \
+     --preset qwen3_0.6b_en --task countdown --algo drgrpo --steps 20
+
+   KERAS_BACKEND=mlx python examples/rl/grpo/keras_hub_rlvr.py \
+     --preset qwen3_0.6b_en --task countdown --algo gspo --steps 20
+   ```
+3. **Multi-Turn Agentic Tool-Use (`<calc>` -> `<result>`) with Zero-Copy LoRA Reference KL**:
+   ```bash
+   KERAS_BACKEND=mlx python examples/rl/grpo/keras_hub_rlvr.py \
+     --preset qwen3_0.6b_en --task tool_math --algo drgrpo --beta 0.02 --max-turns 3 --steps 20
+   ```
+4. **Long-CoT Thinking Mode** (allows full `<think>...</think>` chains before `<answer>`):
+   ```bash
+   KERAS_BACKEND=mlx python examples/rl/grpo/keras_hub_rlvr.py \
+     --preset qwen3_0.6b_en --task countdown --algo dapo --think-mode think --max-new-tokens 384 --steps 10
+   ```
+5. **Minimal Scratch Toy Example** (no preset download):
+   ```bash
+   KERAS_BACKEND=mlx python examples/rl/grpo/keras_mlx_toy.py
+   ```
+
+### 2.6 24 GB Apple Silicon Model & Memory Guide
+
+The following presets fit comfortably within **24 GB Unified RAM** (Apple M4) using `bfloat16`, KV-cached rollout, prompt-sliced reversible LM head, `train_micro_batch_size=1`, and LoRA (`rank=8`):
+
+| Preset | Total Params | Precision | Peak Unified RAM | Step Time (G=4 / G=2) | Notes |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **`qwen3_0.6b_en`** *(default)* | 596M (5.56M LoRA) | `bfloat16` | **1.86–2.75 GB** *(measured)* | **~3.6s** Countdown (`G=4`), **~5.6s** `tool_math` (`G=2`, KL) *(measured)* | Verified end-to-end on M4 24 GB |
+| `gemma3_instruct_270m` | 268M | `bfloat16` | ~1–2 GB *(est.)* | Fast local iteration | Compact Gemma 3 architecture |
+| `qwen2.5_instruct_0.5b_en` | 494M | `bfloat16` | ~1.5–2.5 GB *(est.)* | Fast local iteration | Non-thinking Qwen 2.5 |
+| `gemma3_instruct_1b` | 1.00B | `bfloat16` | ~3.5–5 GB *(est.)* | Moderate | Text-only Gemma 3 1B |
+| `qwen2.5_math_instruct_1.5b_en` | 1.54B | `bfloat16` | ~4.5–6.5 GB *(est.)* | Moderate | Strong math prior |
+| `qwen3_1.7b_en` | 1.72B | `bfloat16` | ~5–7 GB *(est.)* | Moderate | Strongest `bfloat16` reasoning preset for 24 GB |
+| `qwen3_4b_en` | 4.02B | `int4` QLoRA | ~5–8 GB *(est.)* | Slower | Use `--quantize int4` |
+
+*(If Kaggle requires authentication in your environment, pass `--preset hf://Qwen/Qwen3-0.6B`.)*
+
+### 2.7 Run Unit Tests
 
 ```bash
-KERAS_BACKEND=mlx python examples/rl/grpo/keras_mlx_toy.py
+KERAS_BACKEND=mlx python -m unittest -v tunix/rl/keras_grpo_test.py tunix/rl/keras_rl_envs_test.py
 ```
 
-### 2.6 Run Unit Tests
-
-```bash
-KERAS_BACKEND=mlx python -m unittest -v tunix/rl/keras_grpo_test.py
-```
-
-### 2.7 Minimal Usage Example
+### 2.8 Minimal Usage Example
 
 ```python
 import os
@@ -124,9 +169,9 @@ metrics = trainer.train_step(prompts)
 print(metrics)
 ```
 
-### 2.8 Troubleshooting
+### 2.9 Troubleshooting
 
-- **Why `--no-deps` on `tunix`?** Tunix's `pyproject.toml` targets JAX/TPU environments (`flax`, `google-metrax`, `perfetto`, `tensorflow_datasets`, `transformers<=4.57.1` which can trigger old `tokenizers` Rust builds on macOS). Because `tunix/__init__.py` resolves exports lazily, `tunix.rl.keras_grpo` only needs `keras`, `keras-mlx`, `mlx`, and `numpy`.
+- **Why `--no-deps` on `tunix` and `keras-hub`?** Tunix's `pyproject.toml` targets JAX/TPU environments (`flax`, `google-metrax`, `perfetto`, `tensorflow_datasets`, `transformers<=4.57.1`), and `keras-hub`'s `pyproject.toml` pulls in `tensorflow-text`. Installing both with `--no-deps` plus the lightweight tokenizer/preset wheels (`regex`, `tokenizers`, `sentencepiece`, `kagglehub`, `kagglesdk`, `huggingface_hub`, `safetensors`) runs cleanly on Apple Silicon with zero JAX or TensorFlow footprint.
 - **`ValueError: Unable to import backend : mlx`**: An older release of `keras` (`<=3.15.1`) is installed instead of `keras-team/keras` `master` (which added pluggable backend loading). Re-run the `uv pip install` command from Option A or Option B above.
 
 ---
@@ -311,10 +356,11 @@ Tunix's architecture can be decomposed into an algorithm layer and an execution 
 - [x] Implement a toy arithmetic reasoning task (`[Start, A, B] -> [A + B]`).
 - [x] Validate the rollout $\to$ reward evaluation $\to$ advantage calculation $\to$ gradient update cycle with unit tests ([tunix/rl/keras_grpo_test.py](../../tunix/rl/keras_grpo_test.py)).
 
-### Phase 2: LoRA Integration & KerasHub Support
-- [ ] Leverage Keras 3 LoRA layers to demonstrate PEFT GRPO training.
-- [ ] Verify zero-copy reference log-prob calculation by disabling LoRA scaling.
-- [ ] Test with lightweight open models from KerasHub (e.g., Qwen-2.5-0.5B or Gemma-2-2B).
+### Phase 2: LoRA Integration, KerasHub Models & SOTA RLVR (Completed)
+- [x] Leverage Keras 3 / KerasHub LoRA layers (`enable_lora`) for memory-bounded PEFT RLVR training.
+- [x] Verify zero-copy reference KL calculation by disabling LoRA adapters dynamically (`disable_lora`).
+- [x] Add DAPO (`Clip-Higher`, dynamic sampling), Dr.GRPO, GSPO, KV-cached rollout, and micro-batched gradient accumulation (`train_micro_batch_size`).
+- [x] Implement procedural RLVR (`CountdownEnv`) and multi-turn tool-use RL (`ToolMathEnv` with observation loss masking) and verify end-to-end on `qwen3_0.6b_en` on Apple M4 (24 GB).
 
 ### Phase 3: Formal Tunix Integration
 - [ ] Extract the backend-agnostic interfaces in Tunix:

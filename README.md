@@ -6,11 +6,11 @@
 
 </div>
 
-> **Fork Experiment (`jeffcarp/tunix` — `keras-mlx-grpo-proposal`)**: This branch adds an experimental local GRPO prototype running **Keras 3 + Keras MLX** on Apple Silicon without JAX/TPU dependencies.
+> **Fork Experiment (`jeffcarp/tunix` — `keras-mlx-grpo-proposal`)**: This branch adds an experimental local RLVR / GRPO stack running **Keras 3 + KerasHub + Keras MLX** on Apple Silicon without JAX/TPU/TensorFlow dependencies (including DAPO, Dr.GRPO, GSPO, zero-copy LoRA reference KL, KV-cached rollout, and multi-turn tool-use masking).
 >
-> - **Full setup & design guide**: [docs/proposals/keras_mlx_grpo.md](docs/proposals/keras_mlx_grpo.md)
-> - **Core trainer**: [tunix/rl/keras_grpo.py](tunix/rl/keras_grpo.py)
-> - **Toy example**: [examples/rl/grpo/keras_mlx_toy.py](examples/rl/grpo/keras_mlx_toy.py)
+> - **Full setup & 24 GB Apple Silicon guide**: [docs/proposals/keras_mlx_grpo.md](docs/proposals/keras_mlx_grpo.md)
+> - **Core trainer & RLVR environments**: [tunix/rl/keras_grpo.py](tunix/rl/keras_grpo.py), [tunix/rl/keras_rl_envs.py](tunix/rl/keras_rl_envs.py)
+> - **Examples**: [examples/rl/grpo/keras_hub_rlvr.py](examples/rl/grpo/keras_hub_rlvr.py) (KerasHub `qwen3_0.6b_en`), [examples/rl/grpo/keras_mlx_toy.py](examples/rl/grpo/keras_mlx_toy.py) (minimal scratch transformer)
 >
 > ```bash
 > # Quickstart on Apple Silicon with uv (requires Keras master + keras-mlx)
@@ -19,8 +19,10 @@
 > uv pip install \
 >   "keras @ git+https://github.com/keras-team/keras.git" \
 >   "keras-mlx @ git+https://github.com/keras-team/keras-mlx.git"
+> uv pip install --no-deps "keras-hub @ git+https://github.com/keras-team/keras-hub.git"
+> uv pip install regex tokenizers sentencepiece kagglehub kagglesdk huggingface_hub safetensors
 > uv pip install --no-deps -e .
-> KERAS_BACKEND=mlx python examples/rl/grpo/keras_mlx_toy.py
+> KERAS_BACKEND=mlx python examples/rl/grpo/keras_hub_rlvr.py --preset qwen3_0.6b_en --task countdown --algo dapo
 > ```
 
 **Tunix (Tune-in-JAX)** is a JAX based library designed to streamline the
