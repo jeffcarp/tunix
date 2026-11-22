@@ -197,6 +197,13 @@ def parse_args() -> argparse.Namespace:
       default=None,
       help="Optional path to save per-step metrics JSON.",
   )
+  parser.add_argument(
+      "--device",
+      type=str,
+      choices=["auto", "gpu", "cpu"],
+      default="auto",
+      help="MLX device override ('auto', 'gpu', or 'cpu').",
+  )
   return parser.parse_args()
 
 
@@ -205,10 +212,20 @@ def main():
   np.random.seed(args.seed)
   keras.utils.set_random_seed(args.seed)
 
+  device_str = "default"
+  if keras.backend.backend() == "mlx":
+    import mlx.core as mx
+
+    if args.device == "gpu":
+      mx.set_default_device(mx.gpu)
+    elif args.device == "cpu":
+      mx.set_default_device(mx.cpu)
+    device_str = str(mx.default_device())
+
   print("=" * 72)
   print(
       f"Tunix x KerasHub RLVR | Backend: {keras.backend.backend()} | "
-      f"Preset: {args.preset} ({args.dtype})"
+      f"Device: {device_str} | Preset: {args.preset} ({args.dtype})"
   )
   print(
       f"Algo: {args.algo.upper()} | Task: {args.task} ({args.difficulty}) | "
@@ -316,6 +333,12 @@ def main():
 
     solve_pct = float(100.0 * np.mean([float(x["solved"]) for x in last_infos]))
     fmt_pct = float(100.0 * np.mean([float(x["has_format"]) for x in last_infos]))
+    seq_lens = np.sum(metrics["rollout_output"].completion_mask, axis=-1)
+    solved_lens = [float(l) for l, info in zip(seq_lens, last_infos) if info["solved"]]
+    wrong_lens = [float(l) for l, info in zip(seq_lens, last_infos) if not info["solved"]]
+    len_solved_mean = float(np.mean(solved_lens)) if solved_lens else None
+    len_wrong_mean = float(np.mean(wrong_lens)) if wrong_lens else None
+    truncated_pct = float(100.0 * np.mean(seq_lens >= args.max_new_tokens))
 
     history.append(
         {
@@ -328,6 +351,9 @@ def main():
             "pg_clipfrac": float(metrics["pg_clipfrac"]),
             "kl": float(metrics["kl"]),
             "response_len_mean": float(metrics["response_len/mean"]),
+            "len_solved_mean": len_solved_mean,
+            "len_wrong_mean": len_wrong_mean,
+            "truncated_pct": truncated_pct,
             "skipped_zero_var_groups": int(metrics["skipped_zero_var_groups"]),
             "grad_norm": float(metrics["grad_norm"]),
             "rollout_s": float(metrics["rollout_s"]),
