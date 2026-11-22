@@ -102,6 +102,7 @@ class KerasGRPOTest(unittest.TestCase):
         max_tokens_to_generate=2,
         temperature=0.8,
     )
+    self.assertEqual(config.loss_agg_mode, "sequence-mean-token-mean")
 
     def dummy_reward(prompts, completions):
       # Give reward 1.0 if first completion token is even, else 0.0
@@ -234,6 +235,7 @@ class KerasGRPOTest(unittest.TestCase):
     )
     self.assertTrue(config.dynamic_sampling)
     self.assertAlmostEqual(config.epsilon_high, 0.28)
+    self.assertEqual(config.loss_agg_mode, "token-mean")
 
     # Constant rewards for all prompts -> all groups skipped, weights unchanged
     trainer = keras_grpo.KerasGRPOTrainer(

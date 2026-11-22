@@ -98,8 +98,9 @@ class KerasGRPOConfig(algo_config_lib.AlgorithmConfig):
     algo_variant: One of `'grpo'`, `'drgrpo'`, `'dapo'`, or `'gspo'`.
     loss_agg_mode: Loss aggregation strategy (`'token-mean'`,
       `'sequence-mean-token-mean'`, or `'sequence-mean-token-scale'`). Defaults
-      to `'sequence-mean-token-scale'` for `'drgrpo'` and `'token-mean'`
-      otherwise.
+      to `'sequence-mean-token-scale'` for `'drgrpo'`,
+      `'sequence-mean-token-mean'` for `'grpo'`, and `'token-mean'` for
+      `'dapo'` / `'gspo'`.
     num_generations: Number of completions sampled per prompt (G in paper).
     num_iterations: Number of optimization iterations per rollout batch (mu).
     beta: KL divergence penalty coefficient with reference model.
@@ -175,11 +176,12 @@ class KerasGRPOConfig(algo_config_lib.AlgorithmConfig):
     if self.dynamic_sampling is None:
       self.dynamic_sampling = self.algo_variant == "dapo"
     if self.loss_agg_mode is None:
-      self.loss_agg_mode = (
-          "sequence-mean-token-scale"
-          if self.algo_variant == "drgrpo"
-          else "token-mean"
-      )
+      if self.algo_variant == "drgrpo":
+        self.loss_agg_mode = "sequence-mean-token-scale"
+      elif self.algo_variant == "grpo":
+        self.loss_agg_mode = "sequence-mean-token-mean"
+      else:
+        self.loss_agg_mode = "token-mean"
     if self.loss_agg_mode not in valid_loss_agg_modes:
       raise ValueError(
           f"loss_agg_mode must be one of {valid_loss_agg_modes}. "

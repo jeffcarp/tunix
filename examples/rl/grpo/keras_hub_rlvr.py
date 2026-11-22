@@ -32,6 +32,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
 from typing import Any, List, Sequence, Set
@@ -139,6 +140,22 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument("--steps", type=int, default=20)
   parser.add_argument("--prompts-per-step", type=int, default=2)
   parser.add_argument("--num-generations", type=int, default=4)
+  parser.add_argument(
+      "--num-iterations",
+      type=int,
+      default=1,
+      help=(
+          "Number of optimization iterations per rollout batch (mu). Set >1 to "
+          "activate off-policy clipping."
+      ),
+  )
+  parser.add_argument(
+      "--loss-agg-mode",
+      type=str,
+      default=None,
+      choices=["token-mean", "sequence-mean-token-mean", "sequence-mean-token-scale"],
+      help="Optional override for loss aggregation mode.",
+  )
   parser.add_argument("--train-micro-batch-size", type=int, default=1)
   parser.add_argument("--max-new-tokens", type=int, default=256)
   parser.add_argument("--max-turns", type=int, default=3)
@@ -173,6 +190,12 @@ def parse_args() -> argparse.Namespace:
       type=str,
       default=None,
       help="Optional path ending in .lora.h5 to save trained LoRA weights.",
+  )
+  parser.add_argument(
+      "--metrics-json",
+      type=str,
+      default=None,
+      help="Optional path to save per-step metrics JSON.",
   )
   return parser.parse_args()
 
@@ -237,7 +260,9 @@ def main():
 
   config = KerasGRPOConfig(
       algo_variant=args.algo,
+      loss_agg_mode=args.loss_agg_mode,
       num_generations=args.num_generations,
+      num_iterations=args.num_iterations,
       max_tokens_to_generate=args.max_new_tokens,
       temperature=args.temperature,
       top_p=args.top_p,
@@ -253,6 +278,7 @@ def main():
   current_problems: List[Any] = []
   last_infos: List[dict] = []
   last_texts: List[str] = []
+  history: List[dict] = []
 
   def reward_fn(prompts_batch, completions_batch):
     nonlocal last_infos, last_texts
@@ -288,8 +314,27 @@ def main():
 
     metrics = trainer.train_step(prompt_token_batch, tool_step_fn=tool_step_fn)
 
-    solve_pct = 100.0 * np.mean([float(x["solved"]) for x in last_infos])
-    fmt_pct = 100.0 * np.mean([float(x["has_format"]) for x in last_infos])
+    solve_pct = float(100.0 * np.mean([float(x["solved"]) for x in last_infos]))
+    fmt_pct = float(100.0 * np.mean([float(x["has_format"]) for x in last_infos]))
+
+    history.append(
+        {
+            "step": int(step),
+            "reward_mean": float(metrics["reward/mean"]),
+            "reward_max": float(metrics["reward/max"]),
+            "solve_pct": solve_pct,
+            "fmt_pct": fmt_pct,
+            "entropy": float(metrics["entropy"]),
+            "pg_clipfrac": float(metrics["pg_clipfrac"]),
+            "kl": float(metrics["kl"]),
+            "response_len_mean": float(metrics["response_len/mean"]),
+            "skipped_zero_var_groups": int(metrics["skipped_zero_var_groups"]),
+            "grad_norm": float(metrics["grad_norm"]),
+            "rollout_s": float(metrics["rollout_s"]),
+            "train_s": float(metrics["train_s"]),
+            "peak_mem_gb": float(metrics["peak_mem_gb"]),
+        }
+    )
 
     print(
         f"Step {step:2d}/{args.steps:2d} | "
@@ -311,6 +356,14 @@ def main():
         snippet = snippet[:260] + "..."
       print(f"  [Sample] Problem: {sample_prob} | Best Reward: {metrics['rewards'][best_idx]:.2f}")
       print(f"  [Output] {snippet}")
+
+  if args.metrics_json:
+    metrics_dir = os.path.dirname(args.metrics_json)
+    if metrics_dir:
+      os.makedirs(metrics_dir, exist_ok=True)
+    with open(args.metrics_json, "w", encoding="utf-8") as f:
+      json.dump({"args": vars(args), "steps": history}, f, indent=2)
+    print(f"Saved metrics JSON to {args.metrics_json}")
 
   if args.save_lora and args.lora_rank > 0:
     model.backbone.save_lora_weights(args.save_lora)
