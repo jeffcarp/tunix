@@ -119,6 +119,8 @@ class KerasGRPOConfig(algo_config_lib.AlgorithmConfig):
       gradient accumulation across unified RAM.
     max_grad_norm: Optional global L2 norm threshold for gradient clipping.
     use_kv_cache: Whether to use `model.call_with_cache` when available.
+    compile_rollout: Whether to compile single-token KV-cache decode and
+      sampling steps with `mx.compile` when running on MLX.
     max_turns: Maximum tool-interaction turns during rollout.
     offload_optimizer_to_disk: Whether to persist optimizer state to disk
       between rollout and optimization to minimize peak RAM on Apple Silicon.
@@ -147,6 +149,7 @@ class KerasGRPOConfig(algo_config_lib.AlgorithmConfig):
   train_micro_batch_size: Optional[int] = None
   max_grad_norm: Optional[float] = 1.0
   use_kv_cache: bool = True
+  compile_rollout: bool = True
   max_turns: int = 1
   offload_optimizer_to_disk: bool = False
   log_ref_kl: bool = False
@@ -349,12 +352,66 @@ def _maybe_mlx_clear_cache() -> None:
       mx.clear_cache()
 
 
+def _sample_next_token_mlx(
+    raw_logits: Any,
+    key: Any,
+    temperature: float,
+    top_p: float = 1.0,
+) -> Tuple[Any, Any, Any]:
+  """Samples next tokens on-device in MLX and returns `(tok, unscaled_logp, next_key)`."""
+  import mlx.core as mx
+
+  logits_f32 = raw_logits.astype(mx.float32)
+  step_logp = logits_f32 - mx.logsumexp(logits_f32, axis=-1, keepdims=True)
+  next_key, step_key = mx.random.split(key)
+
+  temp = float(temperature)
+  p_val = float(top_p)
+  if temp <= 1e-4:
+    next_tok = mx.argmax(logits_f32, axis=-1).astype(mx.int32)
+  elif 0.0 < p_val < 1.0:
+    scaled = logits_f32 / max(temp, 1e-4)
+    probs = mx.softmax(scaled, axis=-1)
+    sorted_idx = mx.argsort(-probs, axis=-1)
+    sorted_probs = mx.take_along_axis(probs, sorted_idx, axis=-1)
+    cum_probs = mx.cumsum(sorted_probs, axis=-1)
+    keep = (cum_probs - sorted_probs) < p_val
+    filtered_logits = mx.where(
+        keep, mx.log(mx.maximum(sorted_probs, 1e-30)), -1e9
+    )
+    pos = mx.random.categorical(filtered_logits, axis=-1, key=step_key)
+    next_tok = mx.take_along_axis(sorted_idx, pos[:, None], axis=-1)[:, 0].astype(
+        mx.int32
+    )
+  else:
+    scaled = logits_f32 / max(temp, 1e-4)
+    next_tok = mx.random.categorical(scaled, axis=-1, key=step_key).astype(
+        mx.int32
+    )
+
+  tok_logp = mx.take_along_axis(step_logp, next_tok[:, None], axis=-1)[:, 0]
+  return next_tok, tok_logp, next_key
+
+
 def _sample_next_token(
     raw_logits: Any,
     temperature: float,
     top_p: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
   """Samples next tokens and returns `(tokens_np, unscaled_log_probs_np)`."""
+  if keras is not None and keras.backend.backend() == "mlx":
+    import mlx.core as mx
+
+    seed = int(np.random.randint(0, 2**31 - 1))
+    next_tok, tok_logp, _ = _sample_next_token_mlx(
+        raw_logits, mx.random.key(seed), temperature, top_p
+    )
+    mx.eval(next_tok, tok_logp)
+    return (
+        np.asarray(next_tok, dtype=np.int32),
+        np.asarray(tok_logp, dtype=np.float32),
+    )
+
   logits_f32 = ops.cast(raw_logits, "float32")
   step_log_probs = ops.log_softmax(logits_f32, axis=-1)
 
@@ -412,6 +469,8 @@ class KerasRollout:
     self.config = config
     self._cache_uses_padding_mask: Optional[bool] = None
     self._cache_uses_tuple_layers: Optional[bool] = None
+    self._mlx_compiled_decode_cache: Dict[Any, Callable[..., Any]] = {}
+    self._mlx_compile_trace_count: int = 0
 
   def _effective_stop_ids(self) -> set[int]:
     stop_ids: set[int] = set()
@@ -481,6 +540,88 @@ class KerasRollout:
       )
     return logits, cache
 
+  def _call_kv_cache_mlx(
+      self,
+      token_mx: Any,
+      cache: Any,
+      cache_idx_mx: Any,
+      uses_padding: bool,
+      full_pad_mask: Optional[Any] = None,
+  ) -> Tuple[Any, Any]:
+    if uses_padding:
+      logits, _, cache = self.model.call_with_cache(
+          token_ids=token_mx,
+          cache=cache,
+          cache_update_index=cache_idx_mx,
+          padding_mask=full_pad_mask,
+      )
+    else:
+      logits, _, cache = self.model.call_with_cache(
+          token_mx,
+          cache,
+          cache_idx_mx,
+      )
+    return logits, cache
+
+  def _get_mlx_compiled_decode_step(
+      self,
+      all_vars: List[Any],
+      uses_padding: bool,
+  ) -> Callable[..., Any]:
+    """Returns a cached `mx.compile` single-token decode + sampling function."""
+    import mlx.core as mx
+
+    cache_key = (
+        uses_padding,
+        has_lora_layers(self.model),
+        tuple(id(v) for v in all_vars),
+        float(self.config.temperature),
+        float(self.config.top_p),
+    )
+    if cache_key in self._mlx_compiled_decode_cache:
+      return self._mlx_compiled_decode_cache[cache_key]
+
+    temperature = float(self.config.temperature)
+    top_p = float(self.config.top_p)
+
+    if uses_padding:
+
+      @mx.compile
+      def compiled_step(token_id_2d, cache, cache_idx, key, var_values, full_pad_mask):
+        self._mlx_compile_trace_count += 1
+        mapping = list(zip(all_vars, var_values))
+        with StatelessScope(state_mapping=mapping):
+          logits, _, next_cache = self.model.call_with_cache(
+              token_ids=token_id_2d,
+              cache=cache,
+              cache_update_index=cache_idx,
+              padding_mask=full_pad_mask,
+          )
+        next_tok, next_logp, next_key = _sample_next_token_mlx(
+            logits[:, -1, :], key, temperature, top_p
+        )
+        return next_tok, next_logp, next_cache, next_key
+
+    else:
+
+      @mx.compile
+      def compiled_step(token_id_2d, cache, cache_idx, key, var_values):
+        self._mlx_compile_trace_count += 1
+        mapping = list(zip(all_vars, var_values))
+        with StatelessScope(state_mapping=mapping):
+          logits, _, next_cache = self.model.call_with_cache(
+              token_id_2d,
+              cache,
+              cache_idx,
+          )
+        next_tok, next_logp, next_key = _sample_next_token_mlx(
+            logits[:, -1, :], key, temperature, top_p
+        )
+        return next_tok, next_logp, next_cache, next_key
+
+    self._mlx_compiled_decode_cache[cache_key] = compiled_step
+    return compiled_step
+
   def _normalize_prompts(
       self,
       prompt_tokens: Union[np.ndarray, Sequence[Sequence[int]]],
@@ -516,7 +657,86 @@ class KerasRollout:
     mask_steps: List[np.ndarray] = []
     finished = np.zeros(num_g, dtype=bool)
 
-    if use_cache:
+    if use_cache and keras is not None and keras.backend.backend() == "mlx":
+      import mlx.core as mx
+
+      max_len = prompt_len + max_new
+      cache = self._build_empty_cache(num_g, max_len)
+      uses_padding, _ = self._inspect_cache_signature()
+      full_pad_mask = (
+          ops.ones((num_g, max_len), dtype="int32") if uses_padding else None
+      )
+
+      prompt_mx = mx.array(repeated_prompts, dtype=mx.int32)
+      prefill_logits, cache = self._call_kv_cache_mlx(
+          prompt_mx,
+          cache,
+          mx.array(0, dtype=mx.int32),
+          uses_padding,
+          full_pad_mask,
+      )
+
+      all_vars = list(self.model.weights)
+      var_values = [v.value for v in all_vars]
+      compiled_step = (
+          self._get_mlx_compiled_decode_step(all_vars, uses_padding)
+          if self.config.compile_rollout
+          else None
+      )
+
+      key = mx.random.key(int(np.random.randint(0, 2**31 - 1)))
+      cur_tok, cur_logp, key = _sample_next_token_mlx(
+          prefill_logits[:, -1, :],
+          key,
+          self.config.temperature,
+          self.config.top_p,
+      )
+      if max_new > 1:
+        mx.async_eval(cur_tok, cur_logp, cache, key)
+      else:
+        mx.eval(cur_tok, cur_logp)
+
+      for step in range(max_new):
+        has_next = step < max_new - 1
+        if has_next:
+          idx_arr = mx.array(prompt_len + step, dtype=mx.int32)
+          if compiled_step is not None:
+            if uses_padding:
+              next_tok, next_logp, next_cache, next_key = compiled_step(
+                  cur_tok[:, None], cache, idx_arr, key, var_values, full_pad_mask
+              )
+            else:
+              next_tok, next_logp, next_cache, next_key = compiled_step(
+                  cur_tok[:, None], cache, idx_arr, key, var_values
+              )
+          else:
+            logits, next_cache = self._call_kv_cache_mlx(
+                cur_tok[:, None], cache, idx_arr, uses_padding, full_pad_mask
+            )
+            next_tok, next_logp, next_key = _sample_next_token_mlx(
+                logits[:, -1, :],
+                key,
+                self.config.temperature,
+                self.config.top_p,
+            )
+          mx.async_eval(next_tok, next_logp, next_cache, next_key)
+
+        tok_np = np.asarray(cur_tok, dtype=np.int32)
+        logp_np = np.asarray(cur_logp, dtype=np.float32)
+        step_mask = (~finished).astype(np.float32)
+        mask_steps.append(step_mask)
+        if stop_ids:
+          finished = finished | np.isin(tok_np, list(stop_ids))
+
+        generated_tokens.append(tok_np)
+        recorded_logps.append(logp_np * step_mask)
+        if np.all(finished) or not has_next:
+          if has_next:
+            mx.eval(next_tok)
+          break
+
+        cur_tok, cur_logp, cache, key = next_tok, next_logp, next_cache, next_key
+    elif use_cache:
       max_len = prompt_len + max_new
       cache = self._build_empty_cache(num_g, max_len)
       full_pad_mask = None
@@ -598,6 +818,109 @@ class KerasRollout:
 
     prompt_arr = np.asarray(prompt_1d, dtype=np.int32)[None, :]
     prompt_len = len(prompt_1d)
+
+    if use_cache and keras is not None and keras.backend.backend() == "mlx":
+      import mlx.core as mx
+
+      max_len = prompt_len + max_new
+      cache = self._build_empty_cache(1, max_len)
+      uses_padding, _ = self._inspect_cache_signature()
+      full_pad_mask = (
+          ops.ones((1, max_len), dtype="int32") if uses_padding else None
+      )
+
+      logits, cache = self._call_kv_cache_mlx(
+          mx.array(prompt_arr, dtype=mx.int32),
+          cache,
+          mx.array(0, dtype=mx.int32),
+          uses_padding,
+          full_pad_mask,
+      )
+      all_vars = list(self.model.weights)
+      var_values = [v.value for v in all_vars]
+      compiled_step = (
+          self._get_mlx_compiled_decode_step(all_vars, uses_padding)
+          if self.config.compile_rollout
+          else None
+      )
+
+      key = mx.random.key(int(np.random.randint(0, 2**31 - 1)))
+      cur_tok, cur_logp, key = _sample_next_token_mlx(
+          logits[:, -1, :], key, self.config.temperature, self.config.top_p
+      )
+      mx.eval(cur_tok, cur_logp, cache, key)
+      cur_idx = prompt_len
+
+      while len(comp_tokens) < max_new:
+        tok = int(cur_tok[0].item())
+        logp = float(cur_logp[0].item())
+        comp_tokens.append(tok)
+        loss_mask.append(1.0)
+        attn_mask.append(1.0)
+        old_logps.append(logp)
+
+        if tok in stop_ids or len(comp_tokens) >= max_new:
+          break
+
+        idx_arr = mx.array(cur_idx, dtype=mx.int32)
+        if compiled_step is not None:
+          if uses_padding:
+            next_tok, next_logp, cache, key = compiled_step(
+                cur_tok[:, None], cache, idx_arr, key, var_values, full_pad_mask
+            )
+          else:
+            next_tok, next_logp, cache, key = compiled_step(
+                cur_tok[:, None], cache, idx_arr, key, var_values
+            )
+        else:
+          step_logits, cache = self._call_kv_cache_mlx(
+              cur_tok[:, None], cache, idx_arr, uses_padding, full_pad_mask
+          )
+          next_tok, next_logp, key = _sample_next_token_mlx(
+              step_logits[:, -1, :],
+              key,
+              self.config.temperature,
+              self.config.top_p,
+          )
+        cur_idx += 1
+
+        if turns_used < self.config.max_turns:
+          obs_tokens = tool_step_fn(comp_tokens)
+          if obs_tokens:
+            remaining = max_new - len(comp_tokens)
+            if remaining <= 0:
+              mx.eval(cache)
+              break
+            obs_chunk = [int(t) for t in obs_tokens[:remaining]]
+            comp_tokens.extend(obs_chunk)
+            loss_mask.extend([0.0] * len(obs_chunk))
+            attn_mask.extend([1.0] * len(obs_chunk))
+            old_logps.extend([0.0] * len(obs_chunk))
+            turns_used += 1
+
+            if len(comp_tokens) >= max_new:
+              mx.eval(cache)
+              break
+            obs_mx = mx.array(obs_chunk, dtype=mx.int32)[None, :]
+            obs_logits, cache = self._call_kv_cache_mlx(
+                obs_mx,
+                cache,
+                mx.array(cur_idx, dtype=mx.int32),
+                uses_padding,
+                full_pad_mask,
+            )
+            cur_idx += len(obs_chunk)
+            next_tok, next_logp, key = _sample_next_token_mlx(
+                obs_logits[:, -1, :],
+                key,
+                self.config.temperature,
+                self.config.top_p,
+            )
+
+        mx.eval(next_tok, next_logp, cache, key)
+        cur_tok, cur_logp = next_tok, next_logp
+
+      return comp_tokens, loss_mask, attn_mask, old_logps
 
     if use_cache:
       max_len = prompt_len + max_new

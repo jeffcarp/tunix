@@ -450,6 +450,131 @@ class KerasGRPOTest(unittest.TestCase):
         out.attention_completion_mask, np.ones((2, 5), dtype=np.float32)
     )
 
+  def test_compiled_mlx_rollout_single_trace_weight_updates_and_tools(self):
+    if keras.backend.backend() != "mlx":
+      self.skipTest("MLX backend required for compiled MLX rollout test.")
+
+    class _MockBackbone(keras.layers.Layer):
+
+      def __init__(self, vocab_size=12, hidden_dim=8):
+        super().__init__()
+        self.num_layers = 1
+        self.num_query_heads = 2
+        self.num_key_value_heads = 2
+        self.head_dim = 4
+        self.hidden_dim = hidden_dim
+        self.token_embedding = keras.layers.ReversibleEmbedding(
+            input_dim=vocab_size, output_dim=hidden_dim, tie_weights=True
+        )
+        self.proj = keras.layers.Dense(hidden_dim)
+
+      def call(self, inputs):
+        return self.proj(self.token_embedding(inputs["token_ids"]))
+
+    class _MockDictCausalLM(keras.Model):
+
+      def __init__(self, vocab_size=12, hidden_dim=8):
+        super().__init__()
+        self.backbone = _MockBackbone(vocab_size=vocab_size, hidden_dim=hidden_dim)
+
+      def call(self, inputs):
+        hidden = self.backbone(inputs)
+        return self.backbone.token_embedding(hidden, reverse=True)
+
+      def call_with_cache(self, token_ids, cache, cache_update_index):
+        hidden = self.backbone(
+            {"token_ids": token_ids, "padding_mask": ops.ones_like(token_ids)}
+        )
+        logits = self.backbone.token_embedding(hidden, reverse=True)
+        return logits, hidden, cache
+
+    model = _MockDictCausalLM(vocab_size=12, hidden_dim=8)
+    prompts = np.array([[1, 2]], dtype=np.int32)
+    _ = model({
+        "token_ids": ops.convert_to_tensor(prompts),
+        "padding_mask": ops.ones((1, 2), dtype="int32"),
+    })
+
+    cfg = keras_grpo.KerasGRPOConfig(
+        num_generations=3,
+        max_tokens_to_generate=4,
+        temperature=0.8,
+        top_p=0.9,
+        use_kv_cache=True,
+        compile_rollout=True,
+    )
+    rollout = keras_grpo.KerasRollout(model, cfg)
+    trainer = keras_grpo.KerasGRPOTrainer(
+        model=model,
+        optimizer=keras.optimizers.AdamW(learning_rate=0.01),
+        config=cfg,
+        reward_fn=lambda ps, cs: [0.0] * len(cs),
+    )
+
+    out1 = rollout.generate(prompts)
+    out2 = rollout.generate(prompts)
+    self.assertEqual(rollout._mlx_compile_trace_count, 1)
+
+    for out in (out1, out2):
+      full_ids = np.concatenate([out.prompt_ids, out.completion_ids], axis=1)
+      uncached_logps = trainer._compute_logps_for_model(
+          model,
+          full_ids,
+          np.ones_like(full_ids, dtype=np.int32),
+          out.prompt_ids.shape[1],
+          out.completion_ids.shape[1],
+          out.completion_ids,
+      )
+      np.testing.assert_allclose(out.old_log_probs, uncached_logps, atol=1e-4)
+
+    # Verify StatelessScope delivers live weight updates without recompiling.
+    model.backbone.proj.kernel.assign(model.backbone.proj.kernel.value + 0.5)
+    out3 = rollout.generate(prompts)
+    self.assertEqual(rollout._mlx_compile_trace_count, 1)
+
+    full_ids3 = np.concatenate([out3.prompt_ids, out3.completion_ids], axis=1)
+    uncached_after = trainer._compute_logps_for_model(
+        model,
+        full_ids3,
+        np.ones_like(full_ids3, dtype=np.int32),
+        out3.prompt_ids.shape[1],
+        out3.completion_ids.shape[1],
+        out3.completion_ids,
+    )
+    np.testing.assert_allclose(out3.old_log_probs, uncached_after, atol=1e-4)
+
+    # Verify compiled KV-cache multi-turn tool rollout preserves masking.
+    tool_cfg = keras_grpo.KerasGRPOConfig(
+        num_generations=2,
+        max_tokens_to_generate=5,
+        temperature=0.0,
+        max_turns=2,
+        use_kv_cache=True,
+        compile_rollout=True,
+    )
+    tool_rollout = keras_grpo.KerasRollout(model, tool_cfg)
+    calls = [0]
+
+    def fake_tool_step(gen_tokens):
+      if len(gen_tokens) == 1 and calls[0] < 2:
+        calls[0] += 1
+        return [6, 7]
+      return None
+
+    tool_out = tool_rollout.generate([[1, 2]], tool_step_fn=fake_tool_step)
+    self.assertEqual(tool_out.completion_ids.shape, (2, 5))
+    np.testing.assert_array_equal(tool_out.completion_ids[:, 1:3], [[6, 7], [6, 7]])
+    np.testing.assert_array_equal(tool_out.completion_mask[:, 0], [1.0, 1.0])
+    np.testing.assert_array_equal(
+        tool_out.completion_mask[:, 1:3], [[0.0, 0.0], [0.0, 0.0]]
+    )
+    np.testing.assert_array_equal(
+        tool_out.completion_mask[:, 3:5], [[1.0, 1.0], [1.0, 1.0]]
+    )
+    np.testing.assert_array_equal(
+        tool_out.attention_completion_mask, np.ones((2, 5), dtype=np.float32)
+    )
+
 
 if __name__ == "__main__":
   unittest.main()
