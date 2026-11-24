@@ -513,6 +513,39 @@ class SamplerTest(parameterized.TestCase):
     self.assertLen(result.tokens[0], max_generation_steps)
     self.assertNoCommonElements(result.tokens[0], forbidden_tokens)
 
+  def test_zero_temperature_with_top_p_uses_greedy(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+    greedy_result = sampler(
+        ['input string', 'hello world'],
+        max_generation_steps=6,
+        temperature=0.0,
+        top_p=None,
+    )
+    default_top_p_result = sampler(
+        ['input string', 'hello world'],
+        max_generation_steps=6,
+        temperature=0.0,
+        top_p=1.0,
+        top_k=50,
+    )
+    self.assertEqual(greedy_result.text, default_top_p_result.text)
+    for g_tok, t_tok in zip(greedy_result.tokens, default_top_p_result.tokens):
+      np.testing.assert_array_equal(g_tok, t_tok)
+
 
 if __name__ == '__main__':
   absltest.main()

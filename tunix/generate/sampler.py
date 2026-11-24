@@ -380,7 +380,7 @@ class Sampler(base_sampler.BaseSampler):
       utils.check_sampling_mode_conflict(sampling_mode, 'beam_search')
       sampling_parameters['beam_size'] = beam_size
 
-    if top_p is not None:
+    if top_p is not None and temperature > 0.0:
       utils.check_sampling_mode_conflict(sampling_mode, 'top_p')
       sampling_parameters['top_p'] = top_p
       sampling_parameters['top_k'] = top_k
